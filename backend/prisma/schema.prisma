@@ -1,0 +1,180 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  username     String   @unique // always stored lowercase
+  email        String   @unique // always stored lowercase
+  passwordHash String // Argon2id
+  displayName  String
+  status       String   @default("")
+  avatarColor  String   @default("#6366f1")
+  showLastSeen Boolean  @default(true)
+  lastSeenAt   DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  sessions               Session[]
+  passwordResetTokens    PasswordResetToken[]
+  sentRequests           ContactRequest[]         @relation("RequestSender")
+  receivedRequests       ContactRequest[]         @relation("RequestReceiver")
+  contactsA              Contact[]                @relation("ContactA")
+  contactsB              Contact[]                @relation("ContactB")
+  blocking               BlockedUser[]            @relation("Blocker")
+  blockedBy              BlockedUser[]            @relation("Blocked")
+  participations         ConversationParticipant[]
+  messages               Message[]
+  receipts               MessageReceipt[]
+  deletions              MessageDeletion[]
+  notificationPreference NotificationPreference?
+}
+
+model Session {
+  id         String   @id @default(uuid()) @db.Uuid
+  userId     String   @db.Uuid
+  tokenHash  String   @unique // HMAC-SHA256 of the cookie token; the raw token is never stored
+  csrfToken  String
+  createdAt  DateTime @default(now())
+  lastUsedAt DateTime @default(now())
+  expiresAt  DateTime
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @db.Uuid
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model ContactRequest {
+  id         String   @id @default(uuid()) @db.Uuid
+  senderId   String   @db.Uuid
+  receiverId String   @db.Uuid
+  createdAt  DateTime @default(now())
+  sender     User     @relation("RequestSender", fields: [senderId], references: [id], onDelete: Cascade)
+  receiver   User     @relation("RequestReceiver", fields: [receiverId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, receiverId])
+  @@index([receiverId])
+}
+
+// One row per friendship. userAId < userBId is enforced by a CHECK constraint in the migration,
+// so (A,B) and (B,A) can never both exist.
+model Contact {
+  id        String   @id @default(uuid()) @db.Uuid
+  userAId   String   @db.Uuid
+  userBId   String   @db.Uuid
+  createdAt DateTime @default(now())
+  userA     User     @relation("ContactA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User     @relation("ContactB", fields: [userBId], references: [id], onDelete: Cascade)
+
+  @@unique([userAId, userBId])
+  @@index([userBId])
+}
+
+model BlockedUser {
+  id        String   @id @default(uuid()) @db.Uuid
+  blockerId String   @db.Uuid
+  blockedId String   @db.Uuid
+  createdAt DateTime @default(now())
+  blocker   User     @relation("Blocker", fields: [blockerId], references: [id], onDelete: Cascade)
+  blocked   User     @relation("Blocked", fields: [blockedId], references: [id], onDelete: Cascade)
+
+  @@unique([blockerId, blockedId])
+  @@index([blockedId])
+}
+
+model Conversation {
+  id            String   @id @default(uuid()) @db.Uuid
+  directKey     String   @unique // "<smallerUserId>:<largerUserId>" - guarantees one 1:1 conversation per pair
+  createdAt     DateTime @default(now())
+  lastMessageAt DateTime @default(now())
+
+  participants ConversationParticipant[]
+  messages     Message[]
+
+  @@index([lastMessageAt])
+}
+
+model ConversationParticipant {
+  id             String       @id @default(uuid()) @db.Uuid
+  conversationId String       @db.Uuid
+  userId         String       @db.Uuid
+  pinned         Boolean      @default(false)
+  archived       Boolean      @default(false)
+  muted          Boolean      @default(false)
+  joinedAt       DateTime     @default(now())
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId])
+}
+
+model Message {
+  id             String    @id @default(uuid()) @db.Uuid
+  conversationId String    @db.Uuid
+  senderId       String    @db.Uuid
+  clientId       String // client-generated idempotency key
+  body           String // emptied when deleted for everyone
+  replyToId      String?   @db.Uuid
+  createdAt      DateTime  @default(now())
+  deletedAt      DateTime? // set when deleted for everyone
+
+  conversation Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User              @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  replyTo      Message?          @relation("Replies", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies      Message[]         @relation("Replies")
+  receipts     MessageReceipt[]
+  deletions    MessageDeletion[]
+
+  @@unique([senderId, clientId])
+  @@index([conversationId, createdAt, id])
+}
+
+model MessageReceipt {
+  messageId String   @db.Uuid
+  userId    String   @db.Uuid
+  readAt    DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId])
+  @@index([userId])
+}
+
+// "Delete for me": hides a message from one participant only.
+model MessageDeletion {
+  messageId String   @db.Uuid
+  userId    String   @db.Uuid
+  createdAt DateTime @default(now())
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([messageId, userId])
+  @@index([userId])
+}
+
+model NotificationPreference {
+  userId         String  @id @db.Uuid
+  soundEnabled   Boolean @default(true)
+  desktopEnabled Boolean @default(false)
+  previewsEnabled Boolean @default(true)
+  user           User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}

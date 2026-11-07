@@ -1,0 +1,35 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: spatialchat
+      POSTGRES_PASSWORD: spatialchat   # local development only
+      POSTGRES_DB: spatialchat
+    ports: ["127.0.0.1:5433:5432"]  
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spatialchat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports: ["127.0.0.1:1025:1025", "127.0.0.1:8025:8025"]
+  # Optional: run the built app in a container (after `docker compose --profile app up --build`).
+  app:
+    profiles: ["app"]
+    build: .
+    depends_on:
+      db: { condition: service_healthy }
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://spatialchat:spatialchat@db:5432/spatialchat?schema=public
+      SMTP_HOST: mailpit
+      NODE_ENV: development
+    ports: ["127.0.0.1:4000:4000"]
+volumes:
+  pgdata:
